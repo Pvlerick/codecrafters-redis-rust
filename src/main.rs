@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let mut buf = [0u8; 1024];
                 let bytes_read = stream.read(&mut buf)?;
                 if bytes_read > 0 {
+                    println!("{} bytes read on the stream", bytes_read);
                     handle_request(&buf[..bytes_read], &mut stream)?;
                 }
             }
@@ -31,7 +32,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn handle_request(req: &[u8], output: &mut impl Write) -> Result<(), Box<dyn Error>> {
     match req {
         b"PING" => return ping(output),
-        _ => return Ok(()),
+        _ => {
+            println!("req: {:?}", req);
+            return Ok(());
+        }
     }
 }
 
