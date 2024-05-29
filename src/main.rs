@@ -7,21 +7,25 @@ use tokio::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    println!("Logs from your program will appear here!");
-
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
 
     loop {
         let (mut stream, _) = listener.accept().await?;
+
         println!("accepted new connection");
 
-        let mut buf = [0u8; 1024];
-        let bytes_read = stream.read(&mut buf).await?;
+        let _ = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let bytes_read = stream.read(&mut buf).await.unwrap();
 
-        if bytes_read > 0 {
-            println!("{} bytes read on the stream", bytes_read);
-            handle_request(&buf[..bytes_read], &mut stream).await?;
-        }
+            if bytes_read > 0 {
+                println!("{} bytes read on the stream", bytes_read);
+                handle_request(&buf[..bytes_read], &mut stream)
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
     }
 }
 
