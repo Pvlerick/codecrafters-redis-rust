@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("accepted new connection");
 
         let _ = tokio::spawn(async move {
-            let mut buf = [0u8; 1024];
+            let mut buf = [0u8; 512];
             let bytes_read = stream.read(&mut buf).await.unwrap();
 
             if bytes_read > 0 {
@@ -24,8 +24,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .await
                     .unwrap();
             }
-        })
-        .await;
+        });
     }
 }
 
