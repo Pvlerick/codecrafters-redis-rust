@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -11,9 +11,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
+            Ok(mut stream) => {
                 println!("accepted new connection");
-                handle_request(&stream)?;
+                let mut buf = [0u8; 1024];
+                let bytes_read = stream.read(&mut buf)?;
+                if bytes_read > 0 {
+                    handle_request(&buf[..bytes_read], &mut stream)?;
+                }
             }
             Err(e) => {
                 println!("error: {}", e);
@@ -24,22 +28,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn handle_request(mut stream: &TcpStream) -> Result<(), Box<dyn Error>> {
-    let mut buf = [0u8; 1024];
-    let bytes_read = stream.read(&mut buf)?;
-
-    if bytes_read > 0 {
-        match &buf[..bytes_read] {
-            b"PING" => return ping(stream),
-            _ => return Ok(()),
-        }
+fn handle_request(req: &[u8], output: &mut impl Write) -> Result<(), Box<dyn Error>> {
+    match req {
+        b"PING" => return ping(output),
+        _ => return Ok(()),
     }
+}
+
+fn ping(output: &mut impl Write) -> Result<(), Box<dyn Error>> {
+    output.write_all(b"+PONG\r\n")?;
 
     Ok(())
 }
 
-fn ping(mut stream: &TcpStream) -> Result<(), Box<dyn Error>> {
-    stream.write_all(b"+PONG\r\n")?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    Ok(())
+    #[test]
+    fn ping_test() {
+        let mut output = Vec::<u8>::new();
+        assert!(handle_request(b"PING", &mut output).is_ok());
+        assert_eq!(b"+PONG\r\n", output[..].as_ref());
+    }
 }
