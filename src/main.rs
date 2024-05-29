@@ -28,17 +28,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn handle_request<T>(req: &[u8], output: &mut T) -> Result<(), Box<dyn Error>>
+async fn handle_request<T>(_: &[u8], output: &mut T) -> Result<(), Box<dyn Error>>
 where
     T: AsyncWrite + std::marker::Unpin,
 {
-    match req {
-        b"*1\r\n$4\r\nPING\r\n" => return ping(output).await,
-        _ => {
-            println!("req: {:?}", req);
-            return Ok(());
-        }
-    }
+    ping(output).await
+    // match req {
+    //     b"*1\r\n$4\r\nPING\r\n" => return ping(output).await,
+    //     _ => return Ok(()),
+    // }
 }
 
 async fn ping<T>(output: &mut T) -> Result<(), Box<dyn Error>>
