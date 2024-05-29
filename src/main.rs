@@ -1,37 +1,36 @@
-use std::{
-    error::Error,
-    io::{Read, Write},
+use std::error::Error;
+
+use tokio::{
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
 };
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     println!("Logs from your program will appear here!");
 
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:6379").await?;
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
-                println!("accepted new connection");
-                let mut buf = [0u8; 1024];
-                let bytes_read = stream.read(&mut buf)?;
-                if bytes_read > 0 {
-                    println!("{} bytes read on the stream", bytes_read);
-                    handle_request(&buf[..bytes_read], &mut stream)?;
-                }
-            }
-            Err(e) => {
-                println!("error: {}", e);
-            }
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        println!("accepted new connection");
+
+        let mut buf = [0u8; 1024];
+        let bytes_read = stream.read(&mut buf).await?;
+
+        if bytes_read > 0 {
+            println!("{} bytes read on the stream", bytes_read);
+            handle_request(&buf[..bytes_read], &mut stream).await?;
         }
     }
-
-    Ok(())
 }
 
-fn handle_request(req: &[u8], output: &mut impl Write) -> Result<(), Box<dyn Error>> {
+async fn handle_request<T>(req: &[u8], output: &mut T) -> Result<(), Box<dyn Error>>
+where
+    T: AsyncWrite + std::marker::Unpin,
+{
     match req {
-        b"*1\r\n$4\r\nPING\r\n" => return ping(output),
+        b"*1\r\n$4\r\nPING\r\n" => return ping(output).await,
         _ => {
             println!("req: {:?}", req);
             return Ok(());
@@ -39,8 +38,11 @@ fn handle_request(req: &[u8], output: &mut impl Write) -> Result<(), Box<dyn Err
     }
 }
 
-fn ping(output: &mut impl Write) -> Result<(), Box<dyn Error>> {
-    output.write_all(b"+PONG\r\n")?;
+async fn ping<T>(output: &mut T) -> Result<(), Box<dyn Error>>
+where
+    T: AsyncWrite + std::marker::Unpin,
+{
+    output.write_all(b"+PONG\r\n").await?;
 
     Ok(())
 }
@@ -49,10 +51,12 @@ fn ping(output: &mut impl Write) -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn ping_test() {
+    #[tokio::test]
+    async fn ping_test() {
         let mut output = Vec::<u8>::new();
-        assert!(handle_request(b"*1\r\n$4\r\nPING\r\n", &mut output).is_ok());
+        assert!(handle_request(b"*1\r\n$4\r\nPING\r\n", &mut output)
+            .await
+            .is_ok());
         assert_eq!(b"+PONG\r\n", output[..].as_ref());
     }
 }
