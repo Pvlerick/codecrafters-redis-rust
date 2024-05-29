@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn handle_request(req: &[u8], output: &mut impl Write) -> Result<(), Box<dyn Error>> {
     match req {
-        b"PING" => return ping(output),
+        b"*1\r\n$4\r\nPING\r\n" => return ping(output),
         _ => {
             println!("req: {:?}", req);
             return Ok(());
@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn ping_test() {
         let mut output = Vec::<u8>::new();
-        assert!(handle_request(b"PING", &mut output).is_ok());
+        assert!(handle_request(b"*1\r\n$4\r\nPING\r\n", &mut output).is_ok());
         assert_eq!(b"+PONG\r\n", output[..].as_ref());
     }
 }
