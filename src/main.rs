@@ -87,16 +87,11 @@ impl<'a> RequestType<'a> {
                 let (array_len, array_content) = take_until_crlf(array);
                 let _array_len = parse_bytes_to_usize(array_len);
                 match array_content {
-                    [b'$', value @ ..] => {
-                        let (value_len, tail) = take_until_crlf(value);
-                        let value_len = parse_bytes_to_usize(value_len);
-                        let value = &tail[..value_len];
+                    [b'$', ..] => {
+                        let (value, tail) = get_string(array_content)?;
                         return match value {
                             [b'P', b'I', b'N', b'G'] => Ok(RequestType::Ping),
-                            [b'E', b'C', b'H', b'O'] => {
-                                let (msg, _) = get_string(value)?;
-                                Ok(RequestType::Echo(msg))
-                            }
+                            [b'E', b'C', b'H', b'O'] => Ok(RequestType::Echo(&tail[2..])),
                             // [b'S', b'E', b'T'] => {}
                             // [b'G', b'E', b'T'] => {}
                             _ => Ok(RequestType::NotImplemented),
@@ -123,7 +118,6 @@ async fn echo<T>(msg: &[u8], output: &mut T) -> Result<(), Box<dyn Error>>
 where
     T: AsyncWrite + std::marker::Unpin,
 {
-    println!("echo: {:?}", msg);
     output.write_all(msg).await?;
 
     Ok(())
