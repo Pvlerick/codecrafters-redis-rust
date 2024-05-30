@@ -48,35 +48,50 @@ async fn handle_request<T>(req: &[u8], output: &mut T) -> Result<(), Box<dyn Err
 where
     T: AsyncWrite + std::marker::Unpin,
 {
-    println!("req: {:?}", req);
-    println!("req (utf8): {}", String::from_utf8_lossy(req));
+    let request = RequestType::parse(req)?;
 
-    match req {
-        [b'*', array @ ..] => {
-            let (array_len, array_content) = take_until_crlf(array);
-            let _array_len = parse_bytes_to_usize(array_len);
-            match array_content {
-                [b'$', value @ ..] => {
-                    let (value_len, tail) = take_until_crlf(value);
-                    let value_len = parse_bytes_to_usize(value_len);
-                    let value = &tail[..value_len];
-                    match value {
-                        [b'P', b'I', b'N', b'G'] => ping(output).await?,
-                        [b'E', b'C', b'H', b'O'] => {
-                            let (msg_len, msg_content) = take_until_crlf(&tail[value_len..]);
-                            let msg_len = parse_bytes_to_usize(msg_len);
-                            println!("msg len: {}", msg_len);
-                            echo(&msg_content, output).await?;
-                        }
-                        _ => not_implemented(output).await?,
+    match request {
+        RequestType::Ping => ping(output).await,
+        RequestType::Echo(msg) => echo(msg, output).await,
+        RequestType::NotImplemented => not_implemented(output).await,
+    }
+}
+
+enum RequestType<'a> {
+    Ping,
+    Echo(&'a [u8]),
+    NotImplemented,
+}
+
+impl<'a> RequestType<'a> {
+    fn parse(body: &'a [u8]) -> Result<RequestType<'a>, Box<dyn Error>> {
+        println!("body: {:?}", body);
+        println!("body (utf8): {}", String::from_utf8_lossy(body));
+
+        match body {
+            [b'*', array @ ..] => {
+                let (array_len, array_content) = take_until_crlf(array);
+                let _array_len = parse_bytes_to_usize(array_len);
+                match array_content {
+                    [b'$', value @ ..] => {
+                        let (value_len, tail) = take_until_crlf(value);
+                        let value_len = parse_bytes_to_usize(value_len);
+                        let value = &tail[..value_len];
+                        return match value {
+                            [b'P', b'I', b'N', b'G'] => Ok(RequestType::Ping),
+                            [b'E', b'C', b'H', b'O'] => {
+                                let (msg_len, msg_content) = take_until_crlf(&tail[value_len..]);
+                                let _msg_len = parse_bytes_to_usize(msg_len);
+                                Ok(RequestType::Echo(&msg_content))
+                            }
+                            _ => Ok(RequestType::NotImplemented),
+                        };
                     }
+                    _ => return Ok(RequestType::NotImplemented),
                 }
-                _ => not_implemented(output).await?,
             }
-
-            return Ok(());
+            _ => Ok(RequestType::NotImplemented),
         }
-        _ => not_implemented(output).await,
     }
 }
 
