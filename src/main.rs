@@ -1,4 +1,8 @@
-use std::error::Error;
+use std::{
+    collections::HashMap,
+    error::Error,
+    sync::{Arc, Mutex},
+};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -7,6 +11,7 @@ use tokio::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let state = Arc::new(Mutex::new(HashMap::new()));
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
 
     loop {
@@ -14,13 +19,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         println!("accepted new connection");
 
+        let state_ref = state.clone();
         tokio::spawn(async move {
-            process(socket).await;
+            process(socket, state_ref).await;
         });
     }
 }
 
-async fn process(mut socket: TcpStream) {
+async fn process(mut socket: TcpStream, state: Arc<Mutex<HashMap<String, String>>>) {
     let mut buf = [0u8; 256];
 
     loop {
@@ -29,7 +35,7 @@ async fn process(mut socket: TcpStream) {
                 if bytes_read > 0 {
                     println!("{} bytes read on the stream", bytes_read);
 
-                    handle_request(&buf[..bytes_read], &mut socket)
+                    handle_request(&buf[..bytes_read], state.clone(), &mut socket)
                         .await
                         .unwrap();
                 } else {
@@ -44,7 +50,11 @@ async fn process(mut socket: TcpStream) {
     }
 }
 
-async fn handle_request<T>(req: &[u8], output: &mut T) -> Result<(), Box<dyn Error>>
+async fn handle_request<T>(
+    req: &[u8],
+    state: Arc<Mutex<HashMap<String, String>>>,
+    output: &mut T,
+) -> Result<(), Box<dyn Error>>
 where
     T: AsyncWrite + std::marker::Unpin,
 {
@@ -53,6 +63,8 @@ where
     match request {
         RequestType::Ping => ping(output).await,
         RequestType::Echo(msg) => echo(msg, output).await,
+        RequestType::Set(key, value) => set(state, key, value, output).await,
+        RequestType::Get(key) => get(state, key, output).await,
         RequestType::NotImplemented => not_implemented(output).await,
     }
 }
@@ -60,6 +72,8 @@ where
 enum RequestType<'a> {
     Ping,
     Echo(&'a [u8]),
+    Set(&'a [u8], &'a [u8]),
+    Get(&'a [u8]),
     NotImplemented,
 }
 
@@ -80,10 +94,11 @@ impl<'a> RequestType<'a> {
                         return match value {
                             [b'P', b'I', b'N', b'G'] => Ok(RequestType::Ping),
                             [b'E', b'C', b'H', b'O'] => {
-                                let (msg_len, msg_content) = take_until_crlf(&tail[value_len..]);
-                                let _msg_len = parse_bytes_to_usize(msg_len);
-                                Ok(RequestType::Echo(&msg_content))
+                                let (msg, _) = get_string(value)?;
+                                Ok(RequestType::Echo(msg))
                             }
+                            // [b'S', b'E', b'T'] => {}
+                            // [b'G', b'E', b'T'] => {}
                             _ => Ok(RequestType::NotImplemented),
                         };
                     }
@@ -114,6 +129,29 @@ where
     Ok(())
 }
 
+async fn set<T>(
+    state: Arc<Mutex<HashMap<String, String>>>,
+    key: &[u8],
+    value: &[u8],
+    output: &mut T,
+) -> Result<(), Box<dyn Error>>
+where
+    T: AsyncWrite + std::marker::Unpin,
+{
+    Ok(())
+}
+
+async fn get<T>(
+    state: Arc<Mutex<HashMap<String, String>>>,
+    key: &[u8],
+    output: &mut T,
+) -> Result<(), Box<dyn Error>>
+where
+    T: AsyncWrite + std::marker::Unpin,
+{
+    Ok(())
+}
+
 async fn not_implemented<T>(output: &mut T) -> Result<(), Box<dyn Error>>
 where
     T: AsyncWrite + std::marker::Unpin,
@@ -123,19 +161,30 @@ where
     Ok(())
 }
 
-fn take_until_crlf(slice: &[u8]) -> (&[u8], &[u8]) {
+fn get_string(input: &[u8]) -> Result<(&[u8], &[u8]), Box<dyn Error>> {
+    match input {
+        [b'$', tail @ ..] | [b'\r', b'\n', b'$', tail @ ..] => {
+            let (head, tail) = take_until_crlf(tail);
+            let string_len = parse_bytes_to_usize(head);
+            Ok((&tail[..string_len], &tail[string_len..]))
+        }
+        _ => Err("input is not a string - no leading $ found".into()),
+    }
+}
+
+fn take_until_crlf(input: &[u8]) -> (&[u8], &[u8]) {
     let mut prev_char_is_cr = false;
-    for i in 0..slice.len() {
-        if slice[i] == b'\n' && prev_char_is_cr {
-            return (&slice[0..i - 1], &slice[i + 1..]);
-        } else if slice[i] == b'\r' {
+    for i in 0..input.len() {
+        if input[i] == b'\n' && prev_char_is_cr {
+            return (&input[0..i - 1], &input[i + 1..]);
+        } else if input[i] == b'\r' {
             prev_char_is_cr = true;
         } else {
             prev_char_is_cr = false;
         }
     }
 
-    (slice, &[])
+    (input, &[])
 }
 
 fn parse_bytes_to_usize(input: &[u8]) -> usize {
@@ -150,8 +199,9 @@ mod tests {
 
     #[tokio::test]
     async fn single_ping() {
+        let state = Arc::new(Mutex::new(HashMap::new()));
         let mut output = Vec::<u8>::new();
-        assert!(handle_request(b"*1\r\n$4\r\nPING\r\n", &mut output)
+        assert!(handle_request(b"*1\r\n$4\r\nPING\r\n", state, &mut output)
             .await
             .is_ok());
         assert_eq!(b"+PONG\r\n", output[..].as_ref());
@@ -159,13 +209,53 @@ mod tests {
 
     #[tokio::test]
     async fn single_echo() {
+        let state = Arc::new(Mutex::new(HashMap::new()));
         let mut output = Vec::<u8>::new();
         assert!(
-            handle_request(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n", &mut output)
+            handle_request(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n", state, &mut output)
                 .await
                 .is_ok()
         );
         assert_eq!(b"$3\r\nhey\r\n", output[..].as_ref());
+    }
+
+    #[tokio::test]
+    async fn set_get() {
+        let state = Arc::new(Mutex::new(HashMap::new()));
+        let mut output = Vec::<u8>::new();
+        assert!(handle_request(
+            b"*3\r\n$3\r\nSET\r\n$3foo\r\n$4barr\r\n",
+            state.clone(),
+            &mut output
+        )
+        .await
+        .is_ok());
+        assert_eq!(b"+OK\r\n", output[..].as_ref());
+        output = Vec::new();
+        assert!(handle_request(
+            b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n",
+            state.clone(),
+            &mut output
+        )
+        .await
+        .is_ok());
+        assert_eq!(b"$4\r\nbarr\r\n", output[..].as_ref());
+    }
+
+    #[test]
+    fn get_string_ok() {
+        let input = b"$4\r\nECHO\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
+        let (token, tail) = get_string(input).unwrap();
+        assert_eq!(b"ECHO", token);
+        let (token, tail) = get_string(tail).unwrap();
+        assert_eq!(b"foo", token);
+        let (token, _) = get_string(tail).unwrap();
+        assert_eq!(b"bar", token);
+    }
+
+    #[test]
+    fn get_string_err() {
+        assert!(get_string(b"4\r\nECHO\r\n").is_err());
     }
 
     #[test]
