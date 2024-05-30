@@ -2,7 +2,7 @@ use std::error::Error;
 
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
 };
 
 #[tokio::main]
@@ -10,21 +10,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind("127.0.0.1:6379").await?;
 
     loop {
-        let (mut stream, _) = listener.accept().await?;
+        let (socket, _) = listener.accept().await?;
 
         println!("accepted new connection");
 
-        let _ = tokio::spawn(async move {
-            let mut buf = [0u8; 256];
-            let bytes_read = stream.read(&mut buf).await.unwrap();
-
-            if bytes_read > 0 {
-                println!("{} bytes read on the stream", bytes_read);
-                handle_request(&buf[..bytes_read], &mut stream)
-                    .await
-                    .unwrap();
-            }
+        tokio::spawn(async move {
+            process(socket).await;
         });
+    }
+}
+
+async fn process(mut socket: TcpStream) {
+    let mut buf = [0u8; 256];
+
+    loop {
+        match socket.read(&mut buf).await {
+            Ok(bytes_read) => {
+                if bytes_read > 0 {
+                    println!("{} bytes read on the stream", bytes_read);
+
+                    handle_request(&buf[..bytes_read], &mut socket)
+                        .await
+                        .unwrap();
+                } else {
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                break;
+            }
+        }
     }
 }
 
@@ -32,6 +48,9 @@ async fn handle_request<T>(req: &[u8], output: &mut T) -> Result<(), Box<dyn Err
 where
     T: AsyncWrite + std::marker::Unpin,
 {
+    println!("req: {:?}", req);
+    println!("req (utf8): {}", String::from_utf8_lossy(req));
+
     match req {
         [b'*', array @ ..] => {
             let (array_len, mut rest) = take_until_crlf(array);
@@ -44,16 +63,17 @@ where
                         let value = &tail[..value_len];
                         match value {
                             [b'P', b'I', b'N', b'G'] => ping(output).await?,
-                            _ => return Ok(()),
+                            _ => not_implemented(output).await?,
                         }
                         rest = &tail[value_len + 2..]; // Skip crlf
                     }
-                    _ => return Ok(()),
+                    _ => not_implemented(output).await?,
                 }
             }
+
             return Ok(());
         }
-        _ => return Ok(()),
+        _ => not_implemented(output).await,
     }
 }
 
@@ -62,6 +82,15 @@ where
     T: AsyncWrite + std::marker::Unpin,
 {
     output.write_all(b"+PONG\r\n").await?;
+
+    Ok(())
+}
+
+async fn not_implemented<T>(output: &mut T) -> Result<(), Box<dyn Error>>
+where
+    T: AsyncWrite + std::marker::Unpin,
+{
+    output.write_all(b"-Error not implemented\r\n").await?;
 
     Ok(())
 }
