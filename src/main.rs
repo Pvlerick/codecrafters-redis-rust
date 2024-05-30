@@ -53,22 +53,25 @@ where
 
     match req {
         [b'*', array @ ..] => {
-            let (array_len, mut rest) = take_until_crlf(array);
-            let array_len = parse_bytes_to_usize(array_len);
-            for _ in 0..array_len {
-                match rest {
-                    [b'$', value @ ..] => {
-                        let (value_len, tail) = take_until_crlf(value);
-                        let value_len = parse_bytes_to_usize(value_len);
-                        let value = &tail[..value_len];
-                        match value {
-                            [b'P', b'I', b'N', b'G'] => ping(output).await?,
-                            _ => not_implemented(output).await?,
+            let (array_len, array_content) = take_until_crlf(array);
+            let _array_len = parse_bytes_to_usize(array_len);
+            match array_content {
+                [b'$', value @ ..] => {
+                    let (value_len, tail) = take_until_crlf(value);
+                    let value_len = parse_bytes_to_usize(value_len);
+                    let value = &tail[..value_len];
+                    match value {
+                        [b'P', b'I', b'N', b'G'] => ping(output).await?,
+                        [b'E', b'C', b'H', b'O'] => {
+                            let (msg_len, msg_content) = take_until_crlf(&tail[value_len..]);
+                            let msg_len = parse_bytes_to_usize(msg_len);
+                            println!("msg len: {}", msg_len);
+                            echo(&msg_content, output).await?;
                         }
-                        rest = &tail[value_len + 2..]; // Skip crlf
+                        _ => not_implemented(output).await?,
                     }
-                    _ => not_implemented(output).await?,
                 }
+                _ => not_implemented(output).await?,
             }
 
             return Ok(());
@@ -82,6 +85,16 @@ where
     T: AsyncWrite + std::marker::Unpin,
 {
     output.write_all(b"+PONG\r\n").await?;
+
+    Ok(())
+}
+
+async fn echo<T>(msg: &[u8], output: &mut T) -> Result<(), Box<dyn Error>>
+where
+    T: AsyncWrite + std::marker::Unpin,
+{
+    println!("echo: {:?}", msg);
+    output.write_all(msg).await?;
 
     Ok(())
 }
@@ -130,14 +143,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn double_ping() {
+    async fn single_echo() {
         let mut output = Vec::<u8>::new();
         assert!(
-            handle_request(b"*2\r\n$4\r\nPING\r\n$4\r\nPING\r\n", &mut output)
+            handle_request(b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n", &mut output)
                 .await
                 .is_ok()
         );
-        assert_eq!(b"+PONG\r\n+PONG\r\n", output[..].as_ref());
+        assert_eq!(b"$3\r\nhey\r\n", output[..].as_ref());
     }
 
     #[test]
