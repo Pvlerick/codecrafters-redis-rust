@@ -1,9 +1,10 @@
-use std::{collections::HashMap, error::Error, sync::Arc};
+use std::{collections::HashMap, error::Error, sync::Arc, time::Duration};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::Mutex,
+    time::Instant,
 };
 
 #[tokio::main]
@@ -23,7 +24,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn process(mut socket: TcpStream, state: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>) {
+struct Entry {
+    value: Vec<u8>,
+    expiry: Option<Expiry>,
+}
+
+struct Expiry {
+    created_at: Instant,
+    duration: Duration,
+}
+
+impl Entry {
+    fn new(value: &[u8]) -> Entry {
+        Entry {
+            value: value.to_vec(),
+            expiry: None,
+        }
+    }
+
+    fn with_expiry(value: &[u8], expiry: Expiry) -> Entry {
+        Entry {
+            value: value.to_vec(),
+            expiry: Some(expiry),
+        }
+    }
+}
+
+async fn process(mut socket: TcpStream, state: Arc<Mutex<HashMap<Vec<u8>, Entry>>>) {
     let mut buf = [0u8; 256];
 
     loop {
@@ -49,7 +76,7 @@ async fn process(mut socket: TcpStream, state: Arc<Mutex<HashMap<Vec<u8>, Vec<u8
 
 async fn handle_request<T>(
     req: &[u8],
-    state: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
+    state: Arc<Mutex<HashMap<Vec<u8>, Entry>>>,
     output: &mut T,
 ) -> Result<(), Box<dyn Error>>
 where
@@ -60,7 +87,7 @@ where
     match request {
         RequestType::Ping => ping(output).await,
         RequestType::Echo(msg) => echo(msg, output).await,
-        RequestType::Set(key, value) => set(state, key, value, output).await,
+        RequestType::Set(key, value, expiry) => set(state, key, value, expiry, output).await,
         RequestType::Get(key) => get(state, key, output).await,
         RequestType::NotImplemented => not_implemented(output).await,
     }
@@ -69,7 +96,7 @@ where
 enum RequestType<'a> {
     Ping,
     Echo(&'a [u8]),
-    Set(&'a [u8], &'a [u8]),
+    Set(&'a [u8], &'a [u8], Option<Duration>),
     Get(&'a [u8]),
     NotImplemented,
 }
@@ -92,7 +119,7 @@ impl<'a> RequestType<'a> {
                             [b'S', b'E', b'T'] => {
                                 let (key, tail) = get_string(tail)?;
                                 let (value, _) = get_string(tail)?;
-                                Ok(RequestType::Set(key, value))
+                                Ok(RequestType::Set(key, value, None))
                             }
                             [b'G', b'E', b'T'] => {
                                 let (key, _) = get_string(tail)?;
@@ -128,9 +155,10 @@ where
 }
 
 async fn set<T>(
-    state: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
+    state: Arc<Mutex<HashMap<Vec<u8>, Entry>>>,
     key: &[u8],
     value: &[u8],
+    _expiry: Option<Duration>,
     output: &mut T,
 ) -> Result<(), Box<dyn Error>>
 where
@@ -140,8 +168,8 @@ where
         .lock()
         .await
         .entry(key.to_vec())
-        .and_modify(|i| *i = value.to_vec())
-        .or_insert_with(|| value.to_vec());
+        .and_modify(|i| *i = Entry::new(value))
+        .or_insert_with(|| Entry::new(value));
 
     output.write_all(b"+OK\r\n").await?;
 
@@ -149,7 +177,7 @@ where
 }
 
 async fn get<T>(
-    state: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
+    state: Arc<Mutex<HashMap<Vec<u8>, Entry>>>,
     key: &[u8],
     output: &mut T,
 ) -> Result<(), Box<dyn Error>>
@@ -157,17 +185,22 @@ where
     T: AsyncWrite + Send + std::marker::Unpin,
 {
     match state.lock().await.get(key) {
-        Some(value) => {
-            let len = usize_to_ascii_bytes(value.len());
-            let mut buf = Vec::<u8>::with_capacity(5 + len.len() + value.len());
+        Some(entry)
+            if entry
+                .expiry
+                .as_ref()
+                .map_or(true, |i| i.created_at.elapsed() <= i.duration) =>
+        {
+            let len = usize_to_ascii_bytes(entry.value.len());
+            let mut buf = Vec::<u8>::with_capacity(5 + len.len() + entry.value.len());
             buf.extend_from_slice(b"$");
             buf.extend_from_slice(len.as_slice());
             buf.extend_from_slice(b"\r\n");
-            buf.extend_from_slice(value);
+            buf.extend_from_slice(&entry.value);
             buf.extend_from_slice(b"\r\n");
             output.write_all(buf.as_slice()).await?;
         }
-        None => output.write_all(b"$-1\r\n").await?,
+        _ => output.write_all(b"$-1\r\n").await?,
     }
     Ok(())
 }
@@ -219,6 +252,8 @@ fn usize_to_ascii_bytes(input: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::{thread, time::Duration};
+
     use super::*;
 
     #[tokio::test]
@@ -278,6 +313,54 @@ mod tests {
         .await
         .is_ok());
         assert_eq!(b"$4\r\nbarr\r\n", output[..].as_ref());
+    }
+
+    #[tokio::test]
+    async fn set_with_expiry_then_get_within_timeframe() {
+        let state = Arc::new(Mutex::new(HashMap::new()));
+        let mut output = Vec::<u8>::new();
+        assert!(handle_request(
+            b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$4\r\nbarr\r\n$2\r\npx\r\n$3\r\n100\r\n",
+            state.clone(),
+            &mut output
+        )
+        .await
+        .is_ok());
+        assert_eq!(b"+OK\r\n", output[..].as_ref());
+        thread::sleep(Duration::from_millis(15));
+        output = Vec::new();
+        assert!(handle_request(
+            b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n",
+            state.clone(),
+            &mut output
+        )
+        .await
+        .is_ok());
+        assert_eq!(b"$4\r\nbarr\r\n", output[..].as_ref());
+    }
+
+    #[tokio::test]
+    async fn set_with_expiry_then_get_after_timeframe() {
+        let state = Arc::new(Mutex::new(HashMap::new()));
+        let mut output = Vec::<u8>::new();
+        assert!(handle_request(
+            b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$4\r\nbarr\r\n$2\r\npx\r\n$2\r\n10\r\n",
+            state.clone(),
+            &mut output
+        )
+        .await
+        .is_ok());
+        assert_eq!(b"+OK\r\n", output[..].as_ref());
+        thread::sleep(Duration::from_millis(15));
+        output = Vec::new();
+        assert!(handle_request(
+            b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n",
+            state.clone(),
+            &mut output
+        )
+        .await
+        .is_ok());
+        assert_eq!(b"$-1\r\n", output[..].as_ref());
     }
 
     #[test]
