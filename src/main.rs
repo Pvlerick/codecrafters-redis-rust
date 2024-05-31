@@ -1,12 +1,9 @@
-use std::{
-    collections::HashMap,
-    error::Error,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, error::Error, sync::Arc};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::Mutex,
 };
 
 #[tokio::main]
@@ -26,7 +23,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn process(mut socket: TcpStream, state: Arc<Mutex<HashMap<String, String>>>) {
+async fn process(mut socket: TcpStream, state: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>) {
     let mut buf = [0u8; 256];
 
     loop {
@@ -52,11 +49,11 @@ async fn process(mut socket: TcpStream, state: Arc<Mutex<HashMap<String, String>
 
 async fn handle_request<T>(
     req: &[u8],
-    state: Arc<Mutex<HashMap<String, String>>>,
+    state: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     output: &mut T,
 ) -> Result<(), Box<dyn Error>>
 where
-    T: AsyncWrite + std::marker::Unpin,
+    T: AsyncWrite + Send + std::marker::Unpin,
 {
     let request = RequestType::parse(req)?;
 
@@ -92,8 +89,15 @@ impl<'a> RequestType<'a> {
                         return match value {
                             [b'P', b'I', b'N', b'G'] => Ok(RequestType::Ping),
                             [b'E', b'C', b'H', b'O'] => Ok(RequestType::Echo(&tail[2..])),
-                            // [b'S', b'E', b'T'] => {}
-                            // [b'G', b'E', b'T'] => {}
+                            [b'S', b'E', b'T'] => {
+                                let (key, tail) = get_string(tail)?;
+                                let (value, _) = get_string(tail)?;
+                                Ok(RequestType::Set(key, value))
+                            }
+                            [b'G', b'E', b'T'] => {
+                                let (key, _) = get_string(tail)?;
+                                Ok(RequestType::Get(key))
+                            }
                             _ => Ok(RequestType::NotImplemented),
                         };
                     }
@@ -124,7 +128,7 @@ where
 }
 
 async fn set<T>(
-    state: Arc<Mutex<HashMap<String, String>>>,
+    state: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     key: &[u8],
     value: &[u8],
     output: &mut T,
@@ -132,17 +136,39 @@ async fn set<T>(
 where
     T: AsyncWrite + std::marker::Unpin,
 {
+    state
+        .lock()
+        .await
+        .entry(key.to_vec())
+        .and_modify(|i| *i = value.to_vec())
+        .or_insert_with(|| value.to_vec());
+
+    output.write_all(b"+OK\r\n").await?;
+
     Ok(())
 }
 
 async fn get<T>(
-    state: Arc<Mutex<HashMap<String, String>>>,
+    state: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     key: &[u8],
     output: &mut T,
 ) -> Result<(), Box<dyn Error>>
 where
-    T: AsyncWrite + std::marker::Unpin,
+    T: AsyncWrite + Send + std::marker::Unpin,
 {
+    match state.lock().await.get(key) {
+        Some(value) => {
+            let len = usize_to_ascii_bytes(value.len());
+            let mut buf = Vec::<u8>::with_capacity(5 + len.len() + value.len());
+            buf.extend_from_slice(b"$");
+            buf.extend_from_slice(len.as_slice());
+            buf.extend_from_slice(b"\r\n");
+            buf.extend_from_slice(value);
+            buf.extend_from_slice(b"\r\n");
+            output.write_all(buf.as_slice()).await?;
+        }
+        None => output.write_all(b"$-1\r\n").await?,
+    }
     Ok(())
 }
 
@@ -187,6 +213,10 @@ fn parse_bytes_to_usize(input: &[u8]) -> usize {
         .fold(0usize, |a, i| a * 10 + ((*i as usize) - 48))
 }
 
+fn usize_to_ascii_bytes(input: usize) -> Vec<u8> {
+    input.to_string().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,11 +244,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_get() {
+    async fn single_set() {
         let state = Arc::new(Mutex::new(HashMap::new()));
         let mut output = Vec::<u8>::new();
         assert!(handle_request(
-            b"*3\r\n$3\r\nSET\r\n$3foo\r\n$4barr\r\n",
+            b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$4\r\nbarr\r\n",
+            state.clone(),
+            &mut output
+        )
+        .await
+        .is_ok());
+        assert_eq!(b"+OK\r\n", output[..].as_ref());
+    }
+
+    #[tokio::test]
+    async fn set_then_get() {
+        let state = Arc::new(Mutex::new(HashMap::new()));
+        let mut output = Vec::<u8>::new();
+        assert!(handle_request(
+            b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$4\r\nbarr\r\n",
             state.clone(),
             &mut output
         )
@@ -271,5 +315,11 @@ mod tests {
         assert_eq!(5, parse_bytes_to_usize(&[53]));
         assert_eq!(12, parse_bytes_to_usize(&[49, 50]));
         assert_eq!(1548, parse_bytes_to_usize(&[49, 53, 52, 56]));
+    }
+
+    #[test]
+    fn usize_to_ascii_bytes_test() {
+        assert_eq!(vec![53], usize_to_ascii_bytes(5));
+        assert_eq!(vec![53, 48], usize_to_ascii_bytes(50));
     }
 }
