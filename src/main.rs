@@ -31,21 +31,19 @@ struct Entry {
 
 struct Expiry {
     created_at: Instant,
-    duration: Duration,
+    expires_after: Duration,
 }
 
 impl Entry {
-    fn new(value: &[u8]) -> Entry {
+    fn new(value: &[u8], expires_after: Option<Duration>) -> Entry {
         Entry {
             value: value.to_vec(),
-            expiry: None,
-        }
-    }
-
-    fn with_expiry(value: &[u8], expiry: Expiry) -> Entry {
-        Entry {
-            value: value.to_vec(),
-            expiry: Some(expiry),
+            expiry: expires_after.map_or(None, |i| {
+                Some(Expiry {
+                    created_at: Instant::now(),
+                    expires_after: i,
+                })
+            }),
         }
     }
 }
@@ -103,8 +101,8 @@ enum RequestType<'a> {
 
 impl<'a> RequestType<'a> {
     fn parse(body: &'a [u8]) -> Result<RequestType<'a>, Box<dyn Error>> {
-        println!("body: {:?}", body);
-        println!("body (utf8): {}", String::from_utf8_lossy(body));
+        // println!("body: {:?}", body);
+        // println!("body (utf8): {}", String::from_utf8_lossy(body));
 
         match body {
             [b'*', array @ ..] => {
@@ -118,8 +116,21 @@ impl<'a> RequestType<'a> {
                             [b'E', b'C', b'H', b'O'] => Ok(RequestType::Echo(&tail[2..])),
                             [b'S', b'E', b'T'] => {
                                 let (key, tail) = get_string(tail)?;
-                                let (value, _) = get_string(tail)?;
-                                Ok(RequestType::Set(key, value, None))
+                                let (value, tail) = get_string(tail)?;
+                                let (expiry_type, tail) = get_string(tail)?;
+                                match expiry_type {
+                                    [b'p', b'x'] => {
+                                        let (expiry, _) = get_string(tail)?;
+                                        Ok(RequestType::Set(
+                                            key,
+                                            value,
+                                            Some(Duration::from_millis(
+                                                String::from_utf8_lossy(expiry).parse()?,
+                                            )),
+                                        ))
+                                    }
+                                    _ => Ok(RequestType::Set(key, value, None)),
+                                }
                             }
                             [b'G', b'E', b'T'] => {
                                 let (key, _) = get_string(tail)?;
@@ -158,7 +169,7 @@ async fn set<T>(
     state: Arc<Mutex<HashMap<Vec<u8>, Entry>>>,
     key: &[u8],
     value: &[u8],
-    _expiry: Option<Duration>,
+    expires_after: Option<Duration>,
     output: &mut T,
 ) -> Result<(), Box<dyn Error>>
 where
@@ -168,8 +179,8 @@ where
         .lock()
         .await
         .entry(key.to_vec())
-        .and_modify(|i| *i = Entry::new(value))
-        .or_insert_with(|| Entry::new(value));
+        .and_modify(|i| *i = Entry::new(value, expires_after))
+        .or_insert_with(|| Entry::new(value, expires_after));
 
     output.write_all(b"+OK\r\n").await?;
 
@@ -189,7 +200,7 @@ where
             if entry
                 .expiry
                 .as_ref()
-                .map_or(true, |i| i.created_at.elapsed() <= i.duration) =>
+                .map_or(true, |i| i.created_at.elapsed() <= i.expires_after) =>
         {
             let len = usize_to_ascii_bytes(entry.value.len());
             let mut buf = Vec::<u8>::with_capacity(5 + len.len() + entry.value.len());
@@ -221,6 +232,8 @@ fn get_string(input: &[u8]) -> Result<(&[u8], &[u8]), Box<dyn Error>> {
             let string_len = parse_bytes_to_usize(head);
             Ok((&tail[..string_len], &tail[string_len..]))
         }
+        [b'\r', b'\n'] => Ok((&[], &[])),
+        [] => Ok((&[], &[])),
         _ => Err("input is not a string - no leading $ found".into()),
     }
 }
@@ -370,8 +383,10 @@ mod tests {
         assert_eq!(b"ECHO", token);
         let (token, tail) = get_string(tail).unwrap();
         assert_eq!(b"foo", token);
-        let (token, _) = get_string(tail).unwrap();
+        let (token, tail) = get_string(tail).unwrap();
         assert_eq!(b"bar", token);
+        let (token, _) = get_string(tail).unwrap();
+        assert_eq!(&[] as &[u8], token);
     }
 
     #[test]
